@@ -16,3 +16,10 @@ api/test-db.properties
 
 # Frontend dependencies
 node_modules/
+
+# JVM crash logs
+hs_err_pid*.log
+replay_pid*.log
+
+# Frontend build output
+dist/

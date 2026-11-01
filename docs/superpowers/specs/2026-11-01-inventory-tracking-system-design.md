@@ -42,10 +42,10 @@ User management UI (promote/demote users), Google Sign-In `[D-20]`, Postman coll
 | Layer | Technology |
 |---|---|
 | Frontend | React (functional components + hooks), Vite, JavaScript, HTML5, CSS3. Libraries: `react-router-dom`, `firebase` (Auth only), `lucide-react`. Styling with CSS Modules + global design tokens `[T-13]`. |
-| Backend | Java 17, Spring Boot 3.x (selected compatibility baseline; the exact 3.x release is chosen during implementation planning after checking compatibility with Java 17, the Firebase Admin SDK and other dependencies), Spring Web, Spring Data JPA, Spring Security, Bean Validation, Firebase Admin SDK 9.x |
+| Backend | Java 17, **Spring Boot 4.1.2** `[T-21]` (Spring Framework 7, Spring Security 7, Hibernate ORM 7, Jackson 3 — versions managed by Spring Boot), Spring Web MVC, Spring Data JPA, Spring Security, Bean Validation, Firebase Admin SDK 9.x (**9.11.0** selected `[T-21]`), MySQL Connector/J (managed by Spring Boot) |
 | Database | MySQL 8 — **8.0.16 or later required** so `CHECK` constraints are enforced. Local install verified: 8.0.45. |
 | Authentication | Firebase Authentication — **Email/Password provider only** `[D-20]`; Firebase Admin SDK for backend token verification |
-| Testing | JUnit 5, Spring Boot Test, Playwright (brief); Mockito, Vitest, React Testing Library, jsdom `[T-17]` |
+| Testing | Brief: JUnit 5, Spring Boot Test, Playwright. Selected: **JUnit Jupiter 6** (managed by Spring Boot 4.1.2; the successor of JUnit 5 with the same Jupiter programming model) `[T-21]`, Spring Boot Test, Playwright; Mockito, Vitest, React Testing Library, jsdom `[T-17]`. Maven Surefire runs `*Test` classes and Maven Failsafe runs `*IT` classes (Section 8.5) |
 | Tooling | Git, GitHub, Maven, npm, IntelliJ IDEA, VS Code, Claude Code |
 
 Exact dependency versions are confirmed against current official documentation during implementation planning, not assumed.
@@ -227,7 +227,7 @@ This is the **single, authoritative** description of provisioning. For every req
 
    **Why BIGINT.** An individual movement is capped at 1,000,000 `[D-15]`, but repeated Stock IN operations could push the running balance past the `INT` limit (2,147,483,647). The database columns therefore stay `BIGINT`.
 
-   **Why strings in JSON.** A JavaScript `number` is a 64-bit float and represents integers exactly only up to `Number.MAX_SAFE_INTEGER` (2^53 − 1 = 9,007,199,254,740,991). A MySQL `BIGINT` / Java `long` reaches 2^63 − 1, so larger values would be silently rounded by `JSON.parse`. To remove that risk, every `BIGINT`-backed quantity is serialised as a JSON **decimal string** (Jackson `@JsonFormat(shape = JsonFormat.Shape.STRING)` on those DTO fields). `INT`-backed values stay JSON numbers because they are always safe.
+   **Why strings in JSON.** A JavaScript `number` is a 64-bit float and represents integers exactly only up to `Number.MAX_SAFE_INTEGER` (2^53 − 1 = 9,007,199,254,740,991). A MySQL `BIGINT` / Java `long` reaches 2^63 − 1, so larger values would be silently rounded by `JSON.parse`. To remove that risk, every `BIGINT`-backed quantity is serialised as a JSON **decimal string** (Jackson `@JsonFormat(shape = JsonFormat.Shape.STRING)` on those DTO fields; Jackson 3 keeps the `com.fasterxml.jackson.annotation` package, and a slice test confirms the output `[T-21]`). `INT`-backed values stay JSON numbers because they are always safe.
 
    **Frontend handling.**
    - Values are kept as strings in state and passed straight to display; they are never converted with `Number()` / `parseInt()` for display.
@@ -327,7 +327,7 @@ Indexes: `(product_id, created_at)`, `(created_at)`, `(type, created_at)`, `user
 Ordering note `[T-10]`: InnoDB secondary indexes implicitly end with the primary key, so `(product_id, created_at)` effectively covers `(product_id, created_at, id)` and supports `WHERE product_id = ? ORDER BY created_at DESC, id DESC`; `(created_at)` likewise supports the global history ordering.
 
 ### 5.4 SQL files (`database/`) (brief)
-- **`schema.sql`** — creates all tables, constraints and indexes. Contains **no** `DROP` statements `[T-18]`.
+- **`schema.sql`** — creates all tables, constraints and indexes. Contains **no** `DROP` statements `[T-18]`. It is applied manually by the developer (see `database/README.md`) and is **never executed by automated tests**; tests only read it (Section 8.2).
 - **`seed.sql`** — demo categories, suppliers and products only. All seed products have quantity 0. **No seed users and no seed stock transactions**; stock is added through Stock IN by a real authenticated user `[D-14]`. Timestamps use `UTC_TIMESTAMP(6)` `[T-06]`.
 - **`queries.sql`** — documented example queries: low-stock products, stock quantity/value per category, recent movements, movements per user, product movement history.
 
@@ -532,10 +532,12 @@ Pages 1–9 and the first twelve components are from the brief. `NotFound`, `For
 
 ## 8. Testing Strategy
 
-The brief requires JUnit 5, Spring Boot Test and Playwright, and lists the backend and frontend topics to cover. The layering, tools and environments below are design decisions `[T-17][T-18][T-19]`.
+The brief requires JUnit 5, Spring Boot Test and Playwright, and lists the backend and frontend topics to cover. The brief's requirement — automated backend tests written with JUnit and Spring Boot Test — is kept; the version is a technical compatibility decision: Spring Boot 4.1.2 manages **JUnit Jupiter 6**, which is the version this project uses (not JUnit 5) `[T-21]`. The layering, tools and environments below are design decisions `[T-17][T-18][T-19]`.
 
 ### 8.1 Backend
-**Service unit tests (JUnit 5 + Mockito, no database):**
+Backend tests use JUnit Jupiter 6 `[T-21]`. Unit and slice tests are named `*Test` and run with Maven Surefire; MySQL integration tests are named `*IT` and run with Maven Failsafe (commands in Section 8.5).
+
+**Service unit tests (JUnit Jupiter 6 + Mockito, no database; `*Test`):**
 - Products: creation; SKU normalisation; duplicate SKU → 409; update; client-sent `quantity` ignored; missing/archived → 404; archive with stock → 409 `PRODUCT_HAS_STOCK`.
 - Stock: IN increases quantity; OUT decreases quantity; `quantityAfter` correct; insufficient stock → 409; archived product → 404.
 - Categories/suppliers: delete while referenced (including by archived products only) → 409; `productCount` includes archived products.
@@ -544,7 +546,7 @@ The brief requires JUnit 5, Spring Boot Test and Playwright, and lists the backe
   - asserts the verifier invokes `verifyIdToken(token, true)` — i.e. revocation checking is enabled;
   - asserts the error classification of Section 4.3: invalid / expired / revoked / disabled / not-found → `InvalidTokenException`; certificate-fetch and network/service failures → `AuthServiceUnavailableException`; other errors → `AuthVerificationException`.
 
-**Web/security slice tests (`@WebMvcTest` + fake `FirebaseTokenVerifier`):**
+**Web/security slice tests (`@WebMvcTest` + fake `FirebaseTokenVerifier`; `*Test`, no database):**
 - No token → 401. The **fake verifier simulates** verification outcomes by throwing the application exceptions: invalid, expired, revoked or disabled-user token (`InvalidTokenException`) → 401 `UNAUTHENTICATED`; infrastructure failure (`AuthServiceUnavailableException`) → 503 `AUTH_SERVICE_UNAVAILABLE`; unexpected failure (`AuthVerificationException`) → 500 `INTERNAL_ERROR` with no internal details. These tests prove the HTTP mapping; they do not call Firebase.
 - History: `from` > `to` → 400 `VALIDATION_FAILED`.
 - `BIGINT` quantities (`quantity`, `quantityAfter`, `totalStockQuantity`, `totalQuantity`) are serialised as JSON strings.
@@ -553,8 +555,9 @@ The brief requires JUnit 5, Spring Boot Test and Playwright, and lists the backe
 - Invalid body → 400 `VALIDATION_FAILED` with `fieldErrors`; malformed JSON → 400 `MALFORMED_REQUEST`.
 - ProblemDetail shape correct; no stack trace or SQL details in responses.
 
-**Integration tests (`@SpringBootTest` against real MySQL `inventory_test`):**
-- Application context starts with `ddl-auto=validate` against `schema.sql` (proves entity types, including `BIGINT` and `DATETIME(6)`, match the schema).
+**Integration tests (`@SpringBootTest` against the existing schema in MySQL `inventory_test`; `*IT`, run by Failsafe):**
+- Application context starts with `ddl-auto=validate` against the existing `inventory_test` tables (proves entity types, including `BIGINT` and `DATETIME(6)`, match the schema created from `schema.sql`).
+- `SchemaConformanceIT` (read-only) compares the existing `inventory_test` structure with the read-only `database/schema.sql`: tables, engine and collation, primary keys, unique constraints and secondary indexes with column order, foreign keys with referenced columns and delete/update rules, and CHECK constraint definitions (Section 8.2).
 - Repository queries: search, category filter, low stock, history filters (including a row exactly at `from` being included and a row exactly at `to` being excluded); ordering `name ASC, id ASC` and `created_at DESC, id DESC`.
 - Category and supplier names differing only by case (e.g. "Electronics" / "electronics") are rejected as duplicates by the `utf8mb4_0900_ai_ci` unique index.
 - Timestamps round-trip as the same UTC `Instant`.
@@ -566,17 +569,26 @@ The brief requires JUnit 5, Spring Boot Test and Playwright, and lists the backe
 | Environment | Database | Used by |
 |---|---|---|
 | Development | `inventory_db` | Developer running the app locally |
-| Integration tests | `inventory_test` | `mvn test` (`@SpringBootTest`) |
+| Integration tests | `inventory_test` | `*IT` classes run by Maven Failsafe via `mvn verify` (`@SpringBootTest`) |
 | End-to-end tests | `inventory_test` | Playwright, via a backend instance started against `inventory_test` |
-| Production | — | **No automated test, reset script or E2E backend may ever connect to a production database.** |
+| Production | — | **No automated test, cleanup process or E2E backend may ever connect to a production database.** |
 
-Rules:
-- `inventory_test` is created once by the developer using documented SQL and is never used for development data.
+Rules — **existing schema, guarded DELETE-only cleanup** `[T-18]`:
+- `inventory_test` and its tables are created once, manually, by the developer from `database/schema.sql` (`database/README.md` §3). Automated tests **use this existing schema as-is** and it is never used for development data.
+- Automated tests **never** execute `schema.sql`, and never run `DROP`, `TRUNCATE` or any other DDL against `inventory_test`. The test database account therefore needs no `DROP` privilege.
+- Hibernate runs with `spring.jpa.hibernate.ddl-auto=validate`: it checks the entities against the existing tables and never changes them.
+- **`SchemaConformanceIT`** (read-only: `SELECT` on `information_schema` only) compares the existing `inventory_test` structure with `database/schema.sql`, which it reads as a file and never executes. If they differ, the test fails and instructs the developer to re-create the test schema manually; nothing is re-created automatically.
+- **Test data cleanup** uses `DatabaseCleaner`, which issues guarded `DELETE` statements in child-to-parent order, so foreign keys are never violated:
+  1. `stock_transactions`
+  2. `products`
+  3. `users`
+  4. `suppliers`
+  5. `categories`
+- **Guard:** before every cleanup, `DatabaseCleaner` checks `SELECT DATABASE()` and refuses to run unless the database name ends with `_test`. Spring test profiles (`test`, `e2e`) apply the same check at startup.
+- Tests that only read (application context, `SchemaConformanceIT`) do not clean anything; tests that write data clean before each test and after their test class.
 - Test configuration is separate from development configuration. Integration tests connect via `TEST_DB_URL`, `TEST_DB_USERNAME`, `TEST_DB_PASSWORD`.
-- **Reset scripts** (test-only) drop the tables and re-apply `database/schema.sql` (plus `seed.sql` for E2E). Every reset **refuses to run unless the target database name ends with `_test`**.
-- The **backend's `e2e` Spring profile** fails at startup unless its datasource database name ends with `_test`.
-- Integration tests and E2E tests share `inventory_test`, so they must not run at the same time; each run starts by resetting it.
-- `schema.sql` contains no `DROP` statements, so running it on any database cannot destroy data.
+- Integration tests and E2E tests share `inventory_test`, so they must **not run at the same time**.
+- `schema.sql` contains no `DROP` statements, so even a manual run of it can never destroy data.
 
 ### 8.3 Frontend (Vitest + React Testing Library + jsdom)
 - Validation utilities and Login/Register/Product form error messages (including display name required, ≤100 characters).
@@ -588,7 +600,10 @@ Rules:
 
 ### 8.4 End-to-end (Playwright)
 **Environment `[D-21]`:**
-- Frontend dev server + backend started with the `e2e` profile against `inventory_test` (reset with schema and seed before the run).
+- Frontend dev server + backend started with the `e2e` profile against the **existing** `inventory_test` schema. The `e2e` profile **refuses to start unless the database name ends with `_test`**.
+- Before a run, E2E test data is cleared with the same guarded, DELETE-only cleanup as Section 8.2 (child-to-parent order, `_test` check first). The schema is never dropped, truncated, re-created or altered.
+- E2E fixture data (if a scenario needs it) is created only through a separately documented, safe process — to be specified in the E2E phase — that inserts rows into the existing tables (for example through the API, or the INSERT-only, idempotent `database/seed.sql`) and never creates, alters or drops schema objects. It runs only after the `_test` guard.
+- E2E tests never connect to a production database.
 - A **dedicated non-production (development/test) Firebase project is mandatory**. E2E tests must **never** run against a production Firebase project. If only a production project is available, E2E tests are reported as **blocked**, not run.
 - `APP_SECURITY_ADMIN_EMAILS` for the E2E backend includes the ADMIN test account.
 
@@ -599,7 +614,7 @@ Rules:
 | USER | `E2E_USER_EMAIL`, `E2E_USER_PASSWORD` | Pre-created normal account |
 | Registration | `E2E_REGISTER_EMAIL`, `E2E_REGISTER_PASSWORD` | Base address for **new** registrations — see below |
 
-**Repeatable registration test `[T-19]`:** Scenario 1 never re-registers an existing account. For each run the test derives a **unique** address from `E2E_REGISTER_EMAIL` using plus-addressing (e.g. `qa.inventory@example.com` → `qa.inventory+e2e-<timestamp>@example.com`) and registers it with `E2E_REGISTER_PASSWORD`. In teardown, the test signs in as that new account and deletes it through the Firebase Authentication REST API (using the project's web API key), so test accounts do not accumulate in Firebase. The matching `users` row remains only in `inventory_test` and is removed by the next reset. If the mailbox provider does not support plus-addressing, Scenario 1 is reported as **blocked** rather than reusing an existing account.
+**Repeatable registration test `[T-19]`:** Scenario 1 never re-registers an existing account. For each run the test derives a **unique** address from `E2E_REGISTER_EMAIL` using plus-addressing (e.g. `qa.inventory@example.com` → `qa.inventory+e2e-<timestamp>@example.com`) and registers it with `E2E_REGISTER_PASSWORD`. In teardown, the test signs in as that new account and deletes it through the Firebase Authentication REST API (using the project's web API key), so test accounts do not accumulate in Firebase. The matching `users` row remains only in `inventory_test` and is removed by the next guarded cleanup (Section 8.2). If the mailbox provider does not support plus-addressing, Scenario 1 is reported as **blocked** rather than reusing an existing account.
 
 **Scenarios** (from design review; brief requires important workflows):
 1. Register a new account → logout → login.
@@ -610,8 +625,16 @@ Rules:
 6. Archiving a product with stock → `PRODUCT_HAS_STOCK` message.
 7. Mobile viewport: drawer opens; tables render as cards.
 
-### 8.5 Reporting rules
-- Run `mvn test`, `npm test` and configured Playwright tests; report exact pass, fail and skipped/blocked counts from actual output.
+### 8.5 Test execution and reporting rules
+**Backend (Maven, run from `api/`):**
+- Maven **Surefire** runs the unit and slice tests (`*Test`) in the `test` phase. `mvn test` runs **only** these; it does **not** run integration tests.
+- Maven **Failsafe** runs the MySQL integration tests (`*IT`) in the `integration-test` and `verify` phases, so integration tests run through `mvn verify`.
+- **Full verification** is `mvn verify` **without skip properties and without test filters**. It runs both Surefire and Failsafe, and only its result may be reported as "the complete backend test suite passed" — after confirming that every `*IT` class produced a Failsafe report with no skipped tests.
+- **Partial runs** — `mvn test`, a single test class or method (`-Dtest=…`, `-Dit.test=…`), or runs with `-DskipUTs` / `-DskipITs` — are allowed during development but are always reported as partial runs, stating what was skipped, and never as full verification.
+- Exact plugin configuration and command syntax (including Windows PowerShell quoting) are defined in the Backend Implementation Plan.
+
+**General:**
+- Run the backend suite as above, `npm test` and configured Playwright tests; report exact pass, fail and skipped/blocked counts from actual output.
 - If MySQL, Firebase credentials, test accounts or other services are unavailable, affected tests are reported as **blocked / not run**, never as passed.
 - Firebase Emulator and `firebase-tools` are not installed at this stage.
 - No Postman collection is created or published without explicit approval.
@@ -628,7 +651,7 @@ Rules:
 | `GOOGLE_APPLICATION_CREDENTIALS` | backend | Absolute path to the Firebase service-account JSON (non-production project), stored **outside** the repository |
 | `APP_SECURITY_ADMIN_EMAILS` | backend | Comma-separated admin allowlist (binds to `app.security.admin-emails`) |
 | `APP_CORS_ALLOWED_ORIGIN` | backend | Frontend origin, default `http://localhost:5173` |
-| `TEST_DB_URL`, `TEST_DB_USERNAME`, `TEST_DB_PASSWORD` | integration tests, E2E reset | `inventory_test` connection |
+| `TEST_DB_URL`, `TEST_DB_USERNAME`, `TEST_DB_PASSWORD` | integration tests, E2E guarded cleanup | `inventory_test` connection |
 | `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_APP_ID` | frontend (`web/.env`); API key also used by E2E teardown | Firebase web configuration |
 | `E2E_BASE_URL` | Playwright | Frontend URL under test |
 | `E2E_ADMIN_EMAIL`, `E2E_ADMIN_PASSWORD` | Playwright | ADMIN test account |
@@ -708,9 +731,10 @@ Rules:
 | T-15 | Responsive breakpoints (1024px / 768px), button variants, and accessibility specifics. |
 | T-16 | Dashboard shows top 5 low-stock products, latest 10 movements and a hand-built stock-by-category chart. |
 | T-17 | Validation limits mirror column sizes; price max 2 decimal places; optional product description; category/supplier name uniqueness; additional test tools (Mockito, Vitest, React Testing Library, jsdom). |
-| T-18 | Database separation and safety guards: `_test`-suffix checks on reset scripts and the backend `e2e` profile; integration and E2E tests share `inventory_test` but never run concurrently. |
+| T-18 | Database separation and safety guards: automated tests use the **existing** `inventory_test` schema; they never execute `schema.sql` and never run `DROP`, `TRUNCATE` or other DDL; `ddl-auto=validate` plus read-only `SchemaConformanceIT` detect schema drift; test data is removed only by `DatabaseCleaner`'s guarded `DELETE` statements (child-to-parent: `stock_transactions`, `products`, `users`, `suppliers`, `categories`); `_test`-suffix checks before every cleanup and at startup of the `test` and `e2e` profiles; integration and E2E tests share `inventory_test` but never run concurrently. *(revised in revision 6: previously "reset scripts" that dropped tables and re-applied `schema.sql`; changed to the least-privilege approach of the Backend Implementation Plan, decision D-PLAN-1)* |
 | T-19 | Repeatable E2E registration using per-run plus-addressed emails derived from `E2E_REGISTER_EMAIL`, deleted via the Firebase Auth REST API in teardown. |
 | T-20 | Token verification uses `FirebaseAuth.verifyIdToken(idToken, true)` (revocation check enabled, one extra Firebase lookup per request). Classification (Section 4.3): invalid, expired, revoked, disabled-user and deleted-user tokens → 401 `UNAUTHENTICATED`; certificate-fetch and network/service failures → 503 `AUTH_SERVICE_UNAVAILABLE`; any other Firebase or unexpected error → 500 `INTERNAL_ERROR` without internal details. Slice tests use the fake verifier to simulate these outcomes; a separate unit test proves the production verifier calls `verifyIdToken(token, true)` and applies the classification. *(new in revision 3; classification refined in revision 4)* |
+| T-21 | **Spring Boot 4.1.2** replaces the 3.x baseline, because Spring Boot 3.5 (the last 3.x line) reached end of open-source support on 2026-06-30, while 4.1 is supported until 2027-07-31 and runs on Java 17. Consequences: Spring Framework 7.0.10, Spring Security 7.1.2, Hibernate ORM 7.4.13, Jackson 3.1.7 (default JSON library; Jackson 2 support in Boot 4 is deprecated and not used), MySQL Connector/J 9.7.0, JUnit Jupiter 6.0.3 (successor of JUnit 5 named in the brief), modular starters (`spring-boot-starter-webmvc`, module-specific test starters). Firebase Admin SDK **9.11.0** (latest 9.x): it uses Gson, not Jackson, so it does not conflict with Jackson 3; Spring Boot's dependency management upgrades its Netty (4.2.18 → 4.2.19), httpclient5 (5.6.4 → 5.6.5) and slf4j (2.0.19 → 2.0.20) to patch-compatible versions. Hibernate 7 maps `Instant` to `DATETIME` on MySQL, matching `DATETIME(6)`; remaining mapping details (`BOOLEAN`/`TINYINT(1)`, `@Enumerated` columns) are confirmed by the `ddl-auto=validate` integration test in the first backend milestone. *(new in revision 5; pending mentor review)* |
 
 ---
 
