@@ -5,8 +5,10 @@ This folder contains the MySQL database for the Inventory Tracking System.
 | File | Purpose |
 |---|---|
 | `schema.sql` | Creates the 5 tables with keys, constraints and indexes. The single source of truth for the schema. |
-| `seed.sql` | Adds fictional demo categories, suppliers and products (all with quantity 0). Safe to run more than once. |
+| `seed.sql` | Adds fictional demo categories, suppliers, 15 products (all with quantity 0), and IN/OUT history for each product. Safe to run more than once. |
 | `queries.sql` | Read-only example queries that mirror what the application will ask the database. |
+
+Entity-relationship diagram (Mermaid, renders on GitHub): [`docs/er-diagram.md`](../docs/er-diagram.md).
 
 Full design rationale: [`docs/superpowers/specs/2026-11-01-inventory-tracking-system-design.md`](../docs/superpowers/specs/2026-11-01-inventory-tracking-system-design.md), Section 5.
 
@@ -84,13 +86,11 @@ mysql -u root -p --default-character-set=utf8mb4 inventory_test -e "source datab
 mysql -u root -p --default-character-set=utf8mb4 inventory_db -e "source database/seed.sql"
 ```
 
-The seed adds 5 categories, 4 suppliers and 12 products. It deliberately does **not** add:
+The seed adds 5 categories, 4 suppliers, 15 products, and one demo IN plus one demo OUT movement for each product. The two movements net to zero, so every seeded product still has quantity `0`. It also creates a clearly-labelled fictional `warehouse-demo@example.com` USER row because the movement table requires a user foreign key. This is a seed-only actor, not a Firebase account, and it cannot sign in. The seed deliberately does **not** add:
 
-- **users** — a user row is created automatically the first time someone signs in through Firebase;
-- **admin accounts** — admin access comes from the backend's `APP_SECURITY_ADMIN_EMAILS` setting;
-- **stock transactions** — every product starts at quantity `0`; stock is added through *Stock IN* in the app.
+- **real users or admin accounts** — real user rows are created automatically the first time someone signs in through Firebase; admin access comes from the backend's `APP_SECURITY_ADMIN_EMAILS` setting;
 
-Running it again changes nothing: existing rows (matched by category/supplier name or product SKU) are left exactly as they are, including any edits you made.
+Running it again changes nothing: existing rows (matched by category/supplier name, product SKU, demo Firebase UID, and stable movement notes) are left as they are, including edits you made.
 
 ---
 
@@ -100,7 +100,7 @@ Running it again changes nothing: existing rows (matched by category/supplier na
 mysql -u root -p --default-character-set=utf8mb4 --table inventory_db -e "source database/queries.sql"
 ```
 
-Parameters are set at the top of the file; change them to try other values. IDs are never hardcoded: the file looks them up from unique values in `seed.sql` (category name `Electronics`, supplier name `Northwind Electronics Ltd`, product SKU `ELEC-001`), because `AUTO_INCREMENT` IDs are not guaranteed to start at 1. The first result ("lookup check") shows the resolved IDs; `MISSING` means that value is not in the database (for example, `seed.sql` has not been run), and the queries that use it return no rows. Transaction queries return no rows until stock movements exist (after the backend is built).
+Parameters are set at the top of the file; change them to try other values. IDs are never hardcoded: the file looks them up from unique values in `seed.sql` (category name `Electronics`, supplier name `Northwind Electronics Ltd`, product SKU `ELEC-001`), because `AUTO_INCREMENT` IDs are not guaranteed to start at 1. The first result ("lookup check") shows the resolved IDs; `MISSING` means that value is not in the database (for example, `seed.sql` has not been run), and the queries that use it return no rows. The seed creates demo movements for every product, so the history and movement-total queries return sample rows immediately.
 
 ---
 
@@ -176,9 +176,9 @@ Every foreign key uses `ON DELETE RESTRICT`: MySQL refuses to delete a category,
 | Rule | How the database enforces it |
 |---|---|
 | Stock can never be negative | `CHECK (quantity >= 0)` on `products`; `CHECK (quantity_after >= 0)` on `stock_transactions` |
-| A stock movement is 1 to 1,000,000 units | `CHECK (quantity BETWEEN 1 AND 1000000)` |
+| IN and OUT are 1 to 1,000,000 units; an ADJUST delta is non-zero, between −1,000,000 and +1,000,000 | `CHECK (quantity <> 0 AND quantity BETWEEN -1000000 AND 1000000)` and `chk_stock_transactions_sign_by_type` (IN/OUT positive, ADJUST non-zero) |
 | Price is never negative | `CHECK (price >= 0)`, `DECIMAL(12,2)` for exact money values |
-| Only valid roles and movement types | `role` must be exactly `USER` or `ADMIN`; `type` exactly `IN` or `OUT` (case-sensitive checks) |
+| Only valid roles and movement types | `role` must be exactly `USER` or `ADMIN`; `type` exactly `IN`, `OUT` or `ADJUST` (case-sensitive checks) |
 | One MySQL user per Firebase account | `UNIQUE (firebase_uid)`. Email is indexed but **not** unique, because a re-created Firebase account gets a new UID for the same email. |
 | SKU is unique, even for archived products | `UNIQUE (sku)` over all rows, so an archived product's SKU stays reserved |
 | Category and supplier names are unique | `UNIQUE (name)` with collation `utf8mb4_0900_ai_ci`: "Electronics", "electronics" and "ELECTRÓNICS" count as the same name |
@@ -187,12 +187,24 @@ Every foreign key uses `ON DELETE RESTRICT`: MySQL refuses to delete a category,
 Rules that live in the **backend** (future phase), not in SQL:
 
 - **"Deleting" a product archives it** (`active = FALSE`). Archived products disappear from lists and the dashboard but keep their SKU and their full stock history.
-- **Quantity changes only through Stock IN / Stock OUT.** Creating or editing a product never changes its quantity; new products start at `0`.
+- **Quantity changes only through Stock IN / Stock OUT / ADJUST.** ADJUST is ADMIN only and needs a non-empty reason (stored in `note`). Creating or editing a product never changes its quantity; new products start at `0`.
 - **Low stock** means `quantity <= reorder_level`. It is calculated in queries, not stored.
 - **Stock transactions are append-only.** The table has no `updated_at`, and the application offers no way to edit or delete a movement. Each row stores `quantity_after`, the stock level right after that movement, so the history can be checked line by line.
 - **History shows the product's current name and SKU**, read from `products` (no copies are stored in `stock_transactions`). Whether a snapshot of the name and SKU at movement time is needed is still pending mentor confirmation (decision D-26 in the spec).
 
 ---
+
+## 8b. Migrating an existing database (migration 002: ADJUST)
+
+`schema.sql` describes a **new** database. A database built before ADJUST existed must be changed with the
+separate, non-destructive script `database/migrations/002_stock_adjustments.sql`:
+
+- It widens `stock_transactions.type` to `VARCHAR(6)`, replaces the type and quantity CHECKs, and adds `chk_stock_transactions_sign_by_type`.
+- It deletes no rows and changes no existing row. Its pre-checks (section A) must pass first.
+- It is **not** idempotent and has **no automatic rollback**. Take a `mysqldump` backup before running it.
+- Run it only after you have approved it. Do not run the ADJUST backend code against a database that has not been migrated: the old `VARCHAR(3)` column rejects the value `ADJUST`.
+
+The script's header and "If it stops half-way" section describe the exact steps.
 
 ## 9. Time zones (UTC)
 

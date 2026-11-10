@@ -11,6 +11,7 @@
 --   * Low stock means quantity <= reorder_level.
 --   * Paged/ordered results always end with id for deterministic ordering.
 --   * History shows each product's CURRENT name and SKU (no snapshot columns).
+--   * ADJUST quantity is a signed delta; IN and OUT quantities are positive.
 --   * Date ranges: from is inclusive, to is exclusive (from <= created_at < to), UTC.
 --
 -- Run all of them:
@@ -139,7 +140,7 @@ ORDER BY t.created_at DESC, t.id DESC
 LIMIT 20 OFFSET 0;
 
 
--- 10. Stock history filtered by type (IN or OUT), archived products included
+-- 10. Stock history filtered by type (IN, OUT, or ADJUST), archived products included
 SELECT t.id, t.type, t.quantity, t.quantity_after, t.created_at,
        p.sku, p.name AS product_name
 FROM stock_transactions t
@@ -183,7 +184,7 @@ GROUP BY c.id, c.name
 ORDER BY c.name ASC;
 
 
--- 15. Stock movements per user
+-- 15. Stock movement counts per user
 SELECT u.id, COALESCE(u.display_name, u.email) AS user_name,
        SUM(t.type = 'IN')  AS stock_in_count,
        SUM(t.type = 'OUT') AS stock_out_count,
@@ -192,3 +193,33 @@ FROM users u
 JOIN stock_transactions t ON t.user_id = u.id
 GROUP BY u.id, u.display_name, u.email
 ORDER BY total_movements DESC, u.id ASC;
+
+
+-- 16. Movement totals by type: event count, moved units, and signed stock delta.
+--     IN adds quantity, OUT subtracts quantity, and ADJUST is already signed.
+SELECT t.type,
+       COUNT(*) AS movement_count,
+       SUM(ABS(t.quantity)) AS units_moved,
+       SUM(CASE
+               WHEN t.type = 'IN' THEN t.quantity
+               WHEN t.type = 'OUT' THEN -t.quantity
+               ELSE t.quantity
+           END) AS net_stock_delta
+FROM stock_transactions t
+GROUP BY t.type
+ORDER BY t.type;
+
+
+-- 17. Reconciliation: return products where the movement ledger does not
+--     equal products.quantity. A correct result is zero rows.
+SELECT p.id, p.sku, p.name, p.quantity AS stored_quantity,
+       COALESCE(SUM(CASE
+                        WHEN t.type = 'IN' THEN t.quantity
+                        WHEN t.type = 'OUT' THEN -t.quantity
+                        ELSE t.quantity
+                    END), 0) AS movement_quantity
+FROM products p
+LEFT JOIN stock_transactions t ON t.product_id = p.id
+GROUP BY p.id, p.sku, p.name, p.quantity
+HAVING p.quantity <> movement_quantity
+ORDER BY p.sku;

@@ -111,7 +111,8 @@ CREATE TABLE products (
 
 -- -----------------------------------------------------------------------------
 -- stock_transactions: append-only audit trail (no updated_at, never edited/deleted)
---   * quantity       = size of this movement (1 .. 1,000,000)
+--   * quantity       = size of this movement: 1 .. 1,000,000 for IN / OUT;
+--                      signed delta (non-zero, +/- 1,000,000) for ADJUST
 --   * quantity_after = product stock level immediately after this movement
 --   * product name/SKU are read from products at query time (no snapshot columns)
 -- -----------------------------------------------------------------------------
@@ -119,16 +120,19 @@ CREATE TABLE stock_transactions (
     id              BIGINT       NOT NULL AUTO_INCREMENT,
     product_id      BIGINT       NOT NULL,
     user_id         BIGINT       NOT NULL,
-    type            VARCHAR(3)   NOT NULL,
+    type            VARCHAR(6)   NOT NULL,
     quantity        INT          NOT NULL,
     quantity_after  BIGINT       NOT NULL,
     note            VARCHAR(255) NULL,
     created_at      DATETIME(6)  NOT NULL,
 
     CONSTRAINT pk_stock_transactions PRIMARY KEY (id),
-    -- utf8mb4_bin makes the check case-sensitive: only 'IN' / 'OUT' pass.
-    CONSTRAINT chk_stock_transactions_type CHECK (type COLLATE utf8mb4_bin IN ('IN', 'OUT')),
-    CONSTRAINT chk_stock_transactions_quantity_range CHECK (quantity BETWEEN 1 AND 1000000),
+    -- utf8mb4_bin makes the check case-sensitive: only 'IN' / 'OUT' / 'ADJUST' pass.
+    CONSTRAINT chk_stock_transactions_type CHECK (type COLLATE utf8mb4_bin IN ('IN', 'OUT', 'ADJUST')),
+    -- Non-zero and bounded. The sign rule per type is in chk_stock_transactions_sign_by_type below.
+    CONSTRAINT chk_stock_transactions_quantity_range CHECK (quantity <> 0 AND quantity BETWEEN -1000000 AND 1000000),
+    -- IN / OUT are always positive sizes; ADJUST carries the signed delta (non-zero).
+    CONSTRAINT chk_stock_transactions_sign_by_type CHECK ((type COLLATE utf8mb4_bin = 'ADJUST' AND quantity <> 0) OR (type COLLATE utf8mb4_bin IN ('IN', 'OUT') AND quantity > 0)),
     CONSTRAINT chk_stock_transactions_quantity_after_non_negative CHECK (quantity_after >= 0),
     CONSTRAINT fk_stock_transactions_product FOREIGN KEY (product_id)
         REFERENCES products (id) ON DELETE RESTRICT ON UPDATE RESTRICT,

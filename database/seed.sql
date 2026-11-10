@@ -1,17 +1,17 @@
 -- =============================================================================
 -- Inventory Tracking System — demo seed data
 --
--- Seeds categories, suppliers and products ONLY. All data is fictional
+-- Seeds categories, suppliers, products, and a clearly-marked demo user with
+-- two stock movements per product. All data is fictional
 -- (example.com addresses, 555 phone numbers).
---   * No users and no admin accounts: users are created when someone signs in
---     through Firebase.
---   * No stock transactions: every product starts at quantity 0, and stock is
---     added later through Stock IN by a real authenticated user.
+--   * The demo user is NOT a Firebase account and cannot sign in. Its only
+--     purpose is to satisfy the stock_transactions.user_id foreign key.
+--   * Every product gets a demo IN of 10 and OUT of 10. This creates useful
+--     history while leaving every product's current quantity at 0.
 --
--- Safe to run more than once. Each INSERT uses
---   ON DUPLICATE KEY UPDATE <key> = <key>
--- which is a no-op when the row already exists (matched by its unique name or
--- SKU), so re-running neither duplicates rows nor overwrites edits made since.
+-- Safe to run more than once. Category, supplier, product, and demo-user
+-- inserts use a no-op duplicate update. Movement rows are protected by stable
+-- per-product notes and NOT EXISTS checks.
 -- (INSERT IGNORE is avoided on purpose: it would also hide real errors such as
 -- CHECK constraint violations.)
 --
@@ -64,7 +64,46 @@ FROM (
     UNION ALL SELECT 'NET-002',  '8-Port Gigabit Switch',       'Unmanaged desktop switch',                 'Networking',        'Clearwave Networks',         39.90, 4
     UNION ALL SELECT 'CLN-001',  'Surface Disinfectant (1 L)',  'Multi-surface cleaning spray',             'Cleaning Supplies', NULL,                          7.25, 15
     UNION ALL SELECT 'CLN-002',  'Microfiber Cloths (Pack of 10)', 'Reusable cleaning cloths',              'Cleaning Supplies', NULL,                          8.40, 10
+    UNION ALL SELECT 'ELEC-004',  'USB-C Hub (7-in-1)',           'USB-C hub with HDMI, USB-A and card reader', 'Electronics',       'Northwind Electronics Ltd',  32.90, 8
+    UNION ALL SELECT 'OFF-004',   'Sticky Notes (Pack of 6)',     'Adhesive note pads, 76 x 76 mm',            'Office Supplies',   'Bluepeak Office Co',          5.25, 15
+    UNION ALL SELECT 'NET-003',   'Cat6 Patch Panel (24-Port)',   'Rack-mount 24-port Cat6 patch panel',       'Networking',        'Clearwave Networks',         49.00, 2
 ) AS p
 JOIN categories c ON c.name = p.category
 LEFT JOIN suppliers s ON s.name = p.supplier
 ON DUPLICATE KEY UPDATE sku = products.sku;
+
+
+-- -----------------------------------------------------------------------------
+-- Demo actor (not a real Firebase account)
+-- -----------------------------------------------------------------------------
+INSERT INTO users (firebase_uid, email, display_name, role, created_at, updated_at)
+VALUES ('seed-demo-warehouse-user', 'warehouse-demo@example.com', 'Demo Warehouse User', 'USER',
+        UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+ON DUPLICATE KEY UPDATE firebase_uid = users.firebase_uid;
+
+
+-- -----------------------------------------------------------------------------
+-- Demo history: two movements per product, net quantity 0
+-- -----------------------------------------------------------------------------
+INSERT INTO stock_transactions
+    (product_id, user_id, type, quantity, quantity_after, note, created_at)
+SELECT p.id, u.id, 'IN', 10, 10, CONCAT('Seed demo IN for ', p.sku),
+       TIMESTAMPADD(SECOND, -1, UTC_TIMESTAMP(6))
+FROM products p
+JOIN users u ON u.firebase_uid = 'seed-demo-warehouse-user'
+WHERE NOT EXISTS (
+    SELECT 1 FROM stock_transactions t
+    WHERE t.product_id = p.id AND t.user_id = u.id
+      AND t.note = CONCAT('Seed demo IN for ', p.sku)
+);
+
+INSERT INTO stock_transactions
+    (product_id, user_id, type, quantity, quantity_after, note, created_at)
+SELECT p.id, u.id, 'OUT', 10, 0, CONCAT('Seed demo OUT for ', p.sku), UTC_TIMESTAMP(6)
+FROM products p
+JOIN users u ON u.firebase_uid = 'seed-demo-warehouse-user'
+WHERE NOT EXISTS (
+    SELECT 1 FROM stock_transactions t
+    WHERE t.product_id = p.id AND t.user_id = u.id
+      AND t.note = CONCAT('Seed demo OUT for ', p.sku)
+);
